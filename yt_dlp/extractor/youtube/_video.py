@@ -3882,6 +3882,38 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                 note='Downloading initial data API JSON', default_client=webpage_client)
         return initial_data
 
+    def _extract_related_video_ids(self, initial_data, video_id):
+        related_ids = []
+
+        def append_video_id(candidate):
+            if isinstance(candidate, str) and re.fullmatch(r'[\w-]{11}', candidate) and candidate != video_id:
+                related_ids.append(candidate)
+
+        def append_video_id_from_url(url):
+            if not isinstance(url, str):
+                return
+            append_video_id(traverse_obj(parse_qs(url), ('v', -1), get_all=False))
+
+        secondary_results = traverse_obj(initial_data, (
+            'contents', 'twoColumnWatchNextResults', 'secondaryResults',
+            'secondaryResults', 'results'), expected_type=list, default=[])
+        for content in traverse_obj(secondary_results, (
+                ..., ('itemSectionRenderer', 'richSectionRenderer'), 'contents', ...), expected_type=dict):
+            for renderer_name in ('compactVideoRenderer', 'videoRenderer'):
+                append_video_id(traverse_obj(content, (renderer_name, 'videoId'), get_all=False))
+
+            lockup_view_model = content.get('lockupViewModel')
+            if not lockup_view_model:
+                continue
+            append_video_id(traverse_obj(lockup_view_model, ('contentId', {str}), get_all=False))
+            command = traverse_obj(lockup_view_model, (
+                'rendererContext', 'commandContext', 'onTap', 'innertubeCommand'), expected_type=dict, get_all=False)
+            append_video_id(traverse_obj(command, ('watchEndpoint', 'videoId', {str}), get_all=False))
+            append_video_id_from_url(traverse_obj(
+                command, ('commandMetadata', 'webCommandMetadata', 'url', {str}), get_all=False))
+
+        return orderedSet(related_ids)
+
     def _is_premium_subscriber(self, initial_data):
         if not self.is_authenticated or not initial_data:
             return False
@@ -4185,6 +4217,7 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                 'livestream' if get_first(video_details, 'isLiveContent')
                 else 'short' if get_first(microformats, 'isShortsEligible')
                 else 'video'),
+            'related_videos': self._extract_related_video_ids(initial_data, video_id),
             'release_timestamp': live_start_time,
             '_format_sort_fields': (  # source_preference is lower for potentially damaged formats
                 'quality', 'res', 'fps', 'hdr:12', 'source',
